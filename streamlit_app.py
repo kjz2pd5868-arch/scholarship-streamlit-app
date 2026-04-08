@@ -29,6 +29,7 @@ def normalize(text):
 
 
 def get_texts_from_upload(uploaded_file):
+    uploaded_file.seek(0)
     reader = PdfReader(uploaded_file)
 
     raw_pages = []
@@ -196,16 +197,6 @@ def summary(df):
     return pd.DataFrame(rows, columns=["Metric", "Value"])
 
 
-def instructions_sheet():
-    rows = [
-        ["1", "Upload all scholarship PDF files in the app uploader."],
-        ["2", "Click the process button."],
-        ["3", "The Excel file will be generated automatically."],
-        ["4", "Download the finished Excel file."],
-    ]
-    return pd.DataFrame(rows, columns=["Step", "Instructions"])
-
-
 def style_header_row(ws):
     header_fill = PatternFill(fill_type="solid", fgColor=HEADER_FILL_COLOR)
     header_font = Font(bold=True, color=HEADER_FONT_COLOR)
@@ -223,13 +214,6 @@ def style_header_row(ws):
         cell.border = thin_border
 
     ws.row_dimensions[1].height = 24
-
-
-def format_instructions_sheet(ws):
-    style_header_row(ws)
-    ws.freeze_panes = "A2"
-    ws.column_dimensions["A"].width = 10
-    ws.column_dimensions["B"].width = 75
 
 
 def format_scholarships_sheet(ws, df_columns):
@@ -278,21 +262,17 @@ def format_summary_sheet(ws):
 def build_excel_bytes(df):
     main_df = df.drop(columns=["Keywords Raw", "Source Application Type"])
     summary_df = summary(df)
-    instructions_df = instructions_sheet()
 
     output = BytesIO()
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        instructions_df.to_excel(writer, sheet_name="Instructions", index=False)
         main_df.to_excel(writer, sheet_name="Scholarships", index=False)
         summary_df.to_excel(writer, sheet_name="Summary", index=False)
 
         wb = writer.book
-        ws_instructions = wb["Instructions"]
         ws_scholarships = wb["Scholarships"]
         ws_summary = wb["Summary"]
 
-        format_instructions_sheet(ws_instructions)
         format_scholarships_sheet(ws_scholarships, list(main_df.columns))
         format_summary_sheet(ws_summary)
 
@@ -322,7 +302,10 @@ if uploaded_files:
             filename = f"scholarship_database_v2_{timestamp}.xlsx"
 
         st.success("Done.")
-        st.dataframe(df.drop(columns=["Keywords Raw", "Source Application Type"]), use_container_width=True)
+        st.dataframe(
+            df.drop(columns=["Keywords Raw", "Source Application Type"]),
+            use_container_width=True
+        )
 
         st.download_button(
             label="Download Excel file",
