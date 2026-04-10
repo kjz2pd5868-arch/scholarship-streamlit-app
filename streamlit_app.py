@@ -11,21 +11,23 @@ from openpyxl.utils import get_column_letter
 HEADER_FILL_COLOR = "1F4E78"
 HEADER_FONT_COLOR = "FFFFFF"
 
-LOCATION_PATTERNS = [
-    "Illinois", "Chicago", "Bloomington", "Normal", "McLean County",
-    "Coles County", "Cook County", "Peoria", "Springfield", "Decatur",
-    "Central Illinois", "Southern Illinois", "Northern Illinois",
-    "Eastern Illinois", "Western Illinois", "United States", "U.S."
+MAJOR_TERMS = [
+    "accounting", "business", "finance", "marketing", "management",
+    "economics", "computer information systems", "information systems",
+    "computer science", "education", "elementary education",
+    "special education", "nursing", "engineering", "biology",
+    "chemistry", "physics", "mathematics", "math", "psychology",
+    "sociology", "social work", "criminal justice", "history",
+    "english", "journalism", "communication", "communications",
+    "agriculture", "mba", "master of business administration", "stem"
 ]
 
-MAJOR_PATTERNS = [
-    "engineering", "business", "education", "nursing", "accounting",
-    "finance", "marketing", "computer science", "information systems",
-    "biology", "chemistry", "physics", "mathematics", "math",
-    "psychology", "sociology", "social work", "criminal justice",
-    "political science", "history", "english", "journalism",
-    "communication", "communications", "agriculture", "pre-med",
-    "medicine", "STEM"
+LOCATION_WORDS = [
+    "illinois", "indiana", "kentucky", "missouri", "iowa", "chicago",
+    "bloomington", "normal", "mattoon", "charleston", "coles county",
+    "cumberland county", "clay county", "richland county",
+    "mclean county", "cook county", "central illinois",
+    "southern illinois", "northern illinois", "united states"
 ]
 
 
@@ -44,26 +46,23 @@ def normalize(text):
     return re.sub(r"\s+", " ", text).strip() if text else ""
 
 
-def unique_casefold(values):
-    seen = {}
-    for v in values:
-        key = v.casefold()
+def unique_keep_order(items):
+    seen = set()
+    output = []
+    for item in items:
+        key = item.casefold()
         if key not in seen:
-            seen[key] = v
-    return list(seen.values())
+            seen.add(key)
+            output.append(item)
+    return output
 
 
 def get_texts_from_upload(uploaded_file):
     uploaded_file.seek(0)
     reader = PdfReader(uploaded_file)
-
-    raw_pages = []
-    for page in reader.pages:
-        raw_pages.append(page.extract_text() or "")
-
+    raw_pages = [(page.extract_text() or "") for page in reader.pages]
     raw_text = "\n".join(raw_pages)
-    cleaned_text = clean_text(raw_text)
-    return raw_text, cleaned_text
+    return raw_text, clean_text(raw_text)
 
 
 def between(text, start, end):
@@ -93,18 +92,28 @@ def number(text, label):
     return float(match.group(1).replace(",", "")) if match else None
 
 
+def clean_for_requirement_matching(text):
+    text = re.sub(r"\bEastern Illinois University\b", "", text, flags=re.I)
+    text = re.sub(r"\bEIU\b", "", text, flags=re.I)
+    return text
+
+
 def gpa(text):
     patterns = [
-        r"(\d\.\d)\s*GPA",
-        r"GPA of at least (\d\.\d)",
-        r"minimum GPA of (\d\.\d)",
-        r"cumulative GPA of (\d\.\d)",
-        r"maintain a GPA of at least (\d\.\d)"
+        r"minimum GPA of (\d\.\d+|\d)",
+        r"GPA of at least (\d\.\d+|\d)",
+        r"cumulative GPA of (\d\.\d+|\d)",
+        r"maintain a GPA of at least (\d\.\d+|\d)",
+        r"have a GPA of (\d\.\d+|\d) or higher",
+        r"(\d\.\d+|\d)\s*GPA"
     ]
     for pattern in patterns:
         match = re.search(pattern, text, re.I)
         if match:
-            return float(match.group(1))
+            try:
+                return float(match.group(1))
+            except ValueError:
+                pass
     if re.search(r"\bB average\b", text, re.I):
         return 3.0
     return None
@@ -116,63 +125,21 @@ def flag(text, pattern):
 
 def class_levels(text):
     levels = []
-    ordered = ["Freshman", "Sophomore", "Junior", "Senior", "Graduate", "Undergraduate"]
-    for level in ordered:
-        if re.search(rf"\b{re.escape(level)}s?\b", text, re.I):
-            levels.append(level)
-    return "; ".join(levels)
 
-
-def keywords_list(raw):
-    return [normalize(x) for x in raw.split(",") if x.strip()]
-
-
-def geographic_preference(text):
-    found = []
-    for place in LOCATION_PATTERNS:
-        if re.search(rf"\b{re.escape(place)}\b", text, re.I):
-            found.append(place)
-
-    county_matches = re.findall(r"\b[A-Z][a-z]+ County\b", text)
-    state_matches = re.findall(r"\b(?:state of )?([A-Z][a-z]+)\b", text)
-
-    found.extend(county_matches)
-
-    cleaned = unique_casefold([x.strip() for x in found if x.strip()])
-    return ", ".join(cleaned)
-
-
-def underserved_flag(text):
-    pattern = (
-        r"low[- ]income|underprivileged|underserved|disadvantaged|"
-        r"first[- ]generation|first generation|marginalized|"
-        r"historically underrepresented|underrepresented background"
-    )
-    return "Yes" if re.search(pattern, text, re.I) else "No"
-
-
-def major_field(text):
-    found = []
-    for major in MAJOR_PATTERNS:
-        if re.search(rf"\b{re.escape(major)}\b", text, re.I):
-            found.append(major.upper() if major == "STEM" else major.title())
-
-    cleaned = unique_casefold(found)
-    return ", ".join(cleaned)
-
-
-def deadline(text):
-    patterns = [
-        r"Deadline[:\s]+([A-Za-z]+\s+\d{1,2},\s+\d{4})",
-        r"Deadline[:\s]+(\d{1,2}/\d{1,2}/\d{2,4})",
-        r"Applications? due[:\s]+([A-Za-z]+\s+\d{1,2},\s+\d{4})",
-        r"Applications? due[:\s]+(\d{1,2}/\d{1,2}/\d{2,4})",
+    checks = [
+        ("Freshman", r"\bfreshm[ae]n?\b|first[- ]year"),
+        ("Sophomore", r"\bsophomores?\b|second[- ]year"),
+        ("Junior", r"\bjuniors?\b|third[- ]year"),
+        ("Senior", r"\bseniors?\b|fourth[- ]year"),
+        ("Graduate", r"\bgraduate\b|\bmaster'?s\b|\bMBA\b"),
+        ("Undergraduate", r"\bundergraduate\b")
     ]
-    for pattern in patterns:
-        match = re.search(pattern, text, re.I)
-        if match:
-            return match.group(1).strip()
-    return ""
+
+    for label, pattern in checks:
+        if re.search(pattern, text, re.I):
+            levels.append(label)
+
+    return "; ".join(levels)
 
 
 def extract_name(raw_text, fallback_name):
@@ -182,9 +149,15 @@ def extract_name(raw_text, fallback_name):
         "Portfolio", "Applicant", "Basic Information", "Financial Information",
         "Opportunity-Specific Information", "Award Information", "Questions",
     }
+
     skip_patterns = [
-        r"^Fall\s+\d{4}$", r"^Spring\s+\d{4}$", r"^\|\s*Ended", r"^https?://",
-        r"^\d+/\d+$", r"^\d{1,2}/\d{1,2}/\d{2,4},?", r"^Name\s+",
+        r"^Fall\s+\d{4}$",
+        r"^Spring\s+\d{4}$",
+        r"^\|\s*Ended",
+        r"^https?://",
+        r"^\d+/\d+$",
+        r"^\d{1,2}/\d{1,2}/\d{2,4},?",
+        r"^Name\s+",
     ]
 
     for line in lines:
@@ -200,6 +173,108 @@ def extract_name(raw_text, fallback_name):
     return fallback_name.rsplit(".", 1)[0]
 
 
+def geographic_preference(text):
+    text = clean_for_requirement_matching(text)
+
+    context_patterns = [
+        r"(?:resident|residents|residency|living|live|from|preference(?: given)? to students from|students from|permanent address in|graduates? of high schools? in|applicants? from)\s+([^.:\n;]+)",
+        r"(?:must be|shall be)\s+(?:a\s+)?resident of\s+([^.:\n;]+)",
+    ]
+
+    found = []
+
+    for pattern in context_patterns:
+        for match in re.finditer(pattern, text, re.I):
+            chunk = match.group(1)
+
+            for county in re.findall(r"\b[A-Z][a-z]+ County\b", chunk):
+                found.append(county)
+
+            for phrase in LOCATION_WORDS:
+                if re.search(rf"\b{re.escape(phrase)}\b", chunk, re.I):
+                    found.append(phrase.title() if phrase != "mba" else "MBA")
+
+    found = [x.replace("Mclean", "McLean").replace("Coles county", "Coles County")
+               .replace("Clay county", "Clay County").replace("Richland county", "Richland County")
+               .replace("Cumberland county", "Cumberland County").replace("Cook county", "Cook County")
+               .replace("Central illinois", "Central Illinois").replace("Southern illinois", "Southern Illinois")
+               .replace("Northern illinois", "Northern Illinois").replace("United states", "United States")
+             for x in found]
+
+    return ", ".join(unique_keep_order(found))
+
+
+def financial_need(text):
+    pattern = r"financial need|demonstrated need|FAFSA|Pell(?: Grant)?|need-based|economic need"
+    return "Yes" if re.search(pattern, text, re.I) else "No"
+
+
+def underserved_flag(text):
+    pattern = (
+        r"low[- ]income|underprivileged|underserved|disadvantaged|"
+        r"first[- ]generation|first generation|underrepresented|"
+        r"historically marginalized|background of hardship"
+    )
+    return "Yes" if re.search(pattern, text, re.I) else "No"
+
+
+def major_field(text):
+    text = clean_for_requirement_matching(text)
+
+    context_patterns = [
+        r"(?:major(?:ing)? in|majors? in|major field of study in|students? in|enrolled in|pursuing a degree in|degree in)\s+([^.:\n;]+)",
+        r"(?:accounting students|business students|education students|MBA students)",
+    ]
+
+    found = []
+
+    for term in MAJOR_TERMS:
+        # tighter: only count majors when they appear in requirement-like contexts
+        for pattern in context_patterns:
+            for match in re.finditer(pattern, text, re.I):
+                chunk = match.group(0)
+                if re.search(rf"\b{re.escape(term)}\b", chunk, re.I):
+                    found.append(term)
+
+    # direct scholarship phrases
+    direct_map = {
+        "accounting students": "Accounting",
+        "business students": "Business",
+        "education students": "Education",
+        "mba students": "MBA",
+    }
+    for phrase, label in direct_map.items():
+        if re.search(rf"\b{re.escape(phrase)}\b", text, re.I):
+            found.append(label)
+
+    cleaned = []
+    for item in unique_keep_order(found):
+        if item.lower() == "mba":
+            cleaned.append("MBA")
+        elif item.lower() == "stem":
+            cleaned.append("STEM")
+        else:
+            cleaned.append(item.title())
+
+    return ", ".join(cleaned)
+
+
+def deadline(text):
+    patterns = [
+        r"deadline[:\s]+([A-Za-z]+\s+\d{1,2},\s+\d{4})",
+        r"deadline[:\s]+(\d{1,2}/\d{1,2}/\d{2,4})",
+        r"applications? due[:\s]+([A-Za-z]+\s+\d{1,2},\s+\d{4})",
+        r"applications? due[:\s]+(\d{1,2}/\d{1,2}/\d{2,4})",
+        r"due date[:\s]+([A-Za-z]+\s+\d{1,2},\s+\d{4})",
+        r"due date[:\s]+(\d{1,2}/\d{1,2}/\d{2,4})",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, re.I)
+        if match:
+            return match.group(1).strip()
+    return ""
+
+
 def extract(uploaded_file):
     raw_text, text = get_texts_from_upload(uploaded_file)
 
@@ -208,8 +283,7 @@ def extract(uploaded_file):
     full_description = between(text, r"Full\s+[Dd]escription:?\s*", r"\s*Keywords:")
     keywords_raw = between(text, r"Keywords:\s*", r"\s*Type\b")
 
-    combined = f"{description} {full_description}"
-    keywords = keywords_list(keywords_raw)
+    combined = clean_text(f"{description} {full_description} {keywords_raw}")
 
     return {
         "Scholarship Name": scholarship_name,
@@ -221,25 +295,25 @@ def extract(uploaded_file):
         "Opportunity Type": single(raw_text, "Type"),
         "Post-Acceptance Enabled": single(raw_text, "Post-Acceptance"),
         "Minimum GPA": gpa(combined),
-        "Full-Time Required": flag(combined, r"full-time"),
+        "Full-Time Required": flag(combined, r"full[- ]time"),
         "Class Level Eligible": class_levels(combined),
         "Geographic Preference": geographic_preference(combined),
-        "Financial Need Considered": flag(combined, r"financial need"),
+        "Financial Need Considered": financial_need(combined),
         "Low Income / Underprivileged Background": underserved_flag(combined),
         "Major / Field of Study": major_field(combined),
-        "Deadline": deadline(text),
-        "Renewable / Reapply Allowed": flag(combined, r"apply again|eligible to apply again|continues to meet criteria|renewable"),
-        "Resume Required": flag(combined, r"resume"),
-        "Essay Required": flag(combined, r"essay|brief summary|short essay|summary"),
+        "Deadline": deadline(text + "\n" + combined),
+        "Renewable / Reapply Allowed": flag(
+            combined,
+            r"apply again|eligible to apply again|continues to meet criteria|renewable|may reapply"
+        ),
+        "Resume Required": flag(combined, r"\bresume\b|\bcv\b|curriculum vitae"),
+        "Essay Required": flag(combined, r"\bessay\b|brief summary|short essay|personal statement|statement of purpose"),
         "Recommendation Required": flag(combined, r"recommendation|reference letter|letter of recommendation"),
         "Character / Leadership Mentioned": flag(
             combined,
-            r"character|leadership|work ethic|personal values|motivation|goals|magnetic personality"
+            r"character|leadership|work ethic|personal values|motivation|goals|service|integrity"
         ),
-        "Keyword Count": len(keywords),
         "Notes": "",
-        "Keywords Raw": keywords_raw,
-        "Source Application Type": single(raw_text, "Source"),
     }
 
 
@@ -248,11 +322,11 @@ def summary(df):
         ["Total Scholarships", len(df)],
         ["Total Fund Amount", df["Fund Period Amount"].fillna(0).sum()],
         ["", ""],
-        ["Source Application Type", "Count"]
+        ["Opportunity Type", "Count"]
     ]
 
-    source_counts = df["Source Application Type"].fillna("Unknown").replace("", "Unknown").value_counts()
-    for key, value in source_counts.items():
+    counts = df["Opportunity Type"].fillna("Unknown").replace("", "Unknown").value_counts()
+    for key, value in counts.items():
         rows.append([key, int(value)])
 
     return pd.DataFrame(rows, columns=["Metric", "Value"])
@@ -283,7 +357,8 @@ def format_scholarships_sheet(ws, df_columns):
     ws.auto_filter.ref = ws.dimensions
 
     col_index = {name: idx + 1 for idx, name in enumerate(df_columns)}
-    preferred_widths = {
+
+    widths = {
         "Scholarship Name": 38,
         "Import Date": 21,
         "Fund Period Amount": 16,
@@ -297,7 +372,7 @@ def format_scholarships_sheet(ws, df_columns):
         "Class Level Eligible": 24,
         "Geographic Preference": 28,
         "Financial Need Considered": 18,
-        "Low Income / Underprivileged Background": 24,
+        "Low Income / Underprivileged Background": 26,
         "Major / Field of Study": 24,
         "Deadline": 16,
         "Renewable / Reapply Allowed": 20,
@@ -305,11 +380,10 @@ def format_scholarships_sheet(ws, df_columns):
         "Essay Required": 14,
         "Recommendation Required": 18,
         "Character / Leadership Mentioned": 24,
-        "Keyword Count": 12,
         "Notes": 28,
     }
 
-    for col_name, width in preferred_widths.items():
+    for col_name, width in widths.items():
         if col_name in col_index:
             ws.column_dimensions[get_column_letter(col_index[col_name])].width = width
 
@@ -322,16 +396,15 @@ def format_summary_sheet(ws):
 
 
 def build_excel_bytes(df):
-    main_df = df.drop(columns=["Keywords Raw", "Source Application Type"])
     summary_df = summary(df)
-
     output = BytesIO()
+
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        main_df.to_excel(writer, sheet_name="Scholarships", index=False)
+        df.to_excel(writer, sheet_name="Scholarships", index=False)
         summary_df.to_excel(writer, sheet_name="Summary", index=False)
 
         wb = writer.book
-        format_scholarships_sheet(wb["Scholarships"], list(main_df.columns))
+        format_scholarships_sheet(wb["Scholarships"], list(df.columns))
         format_summary_sheet(wb["Summary"])
 
     output.seek(0)
@@ -372,10 +445,7 @@ if uploaded_files:
             filename = f"scholarship_database_v2_{timestamp}.xlsx"
 
             st.success("Processing complete.")
-            st.dataframe(
-                df.drop(columns=["Keywords Raw", "Source Application Type"]),
-                use_container_width=True
-            )
+            st.dataframe(df, use_container_width=True)
 
             st.download_button(
                 label="Download Excel file",
