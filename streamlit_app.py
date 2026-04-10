@@ -23,37 +23,49 @@ MAJOR_TERMS = [
 ]
 
 LOCATION_WORDS = [
-    "illinois", "indiana", "kentucky", "missouri", "iowa", "chicago",
-    "bloomington", "normal", "mattoon", "charleston", "coles county",
-    "cumberland county", "clay county", "richland county",
+    "illinois", "indiana", "kentucky", "missouri", "iowa",
+    "chicago", "bloomington", "normal", "mattoon", "charleston",
+    "coles county", "cumberland county", "clay county", "richland county",
     "mclean county", "cook county", "central illinois",
     "southern illinois", "northern illinois", "united states"
 ]
 
+MONTHS = (
+    "January|February|March|April|May|June|July|August|September|October|November|December|"
+    "Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec"
+)
 
-def clean_text(text):
+
+def clean_text(text: str) -> str:
     if not text:
         return ""
     text = text.replace("\r", "\n")
     text = re.sub(r"https?://\S+", "", text)
-    text = re.sub(r"\b\d{1,2}/\d{1,2}/\d{2,4},?\s+\d{1,2}:\d{2}\s*[APMapm]{2}\b", "", text)
     text = re.sub(r"\n[ \t]*\n+", "\n\n", text)
     text = re.sub(r"[ \t]+", " ", text)
     return text.strip()
 
 
-def normalize(text):
+def normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip() if text else ""
+
+
+def safe(value):
+    if value is None:
+        return "Not Specified"
+    if isinstance(value, str) and not value.strip():
+        return "Not Specified"
+    return value
 
 
 def unique_keep_order(items):
     seen = set()
     output = []
     for item in items:
-        key = item.casefold()
-        if key not in seen:
+        key = normalize(item).casefold()
+        if key and key not in seen:
             seen.add(key)
-            output.append(item)
+            output.append(normalize(item))
     return output
 
 
@@ -62,7 +74,8 @@ def get_texts_from_upload(uploaded_file):
     reader = PdfReader(uploaded_file)
     raw_pages = [(page.extract_text() or "") for page in reader.pages]
     raw_text = "\n".join(raw_pages)
-    return raw_text, clean_text(raw_text)
+    cleaned_text = clean_text(raw_text)
+    return raw_text, cleaned_text
 
 
 def between(text, start, end):
@@ -72,23 +85,28 @@ def between(text, start, end):
 
 def single(text, label):
     patterns = [
-        rf"{re.escape(label)}\s+(.*?)(?=\n[A-Z][A-Za-z /-]+(?:\n|$))",
-        rf"{re.escape(label)}\s+(.*?)(?=\s+[A-Z][A-Za-z /-]+(?:\s|$))"
+        rf"{re.escape(label)}\s*:?\s*(.*?)(?=\n[A-Z][A-Za-z0-9 /&()'-]+(?:\n|$))",
+        rf"{re.escape(label)}\s*:?\s*(.*?)(?=\s+[A-Z][A-Za-z0-9 /&()'-]+(?:\s|$))",
     ]
+    stop_words = (
+        r"\b(?:Visibility|Financial Information|Opportunity-Specific Information|"
+        r"Department|Donor|Fund Code|Auxiliary Fund Code|Project ID|Type|"
+        r"Post-Acceptance|Source|Visible Award Amount|Description|Full Description|"
+        r"Keywords|Award Information|Questions)\b"
+    )
+
     for pattern in patterns:
         match = re.search(pattern, text, re.S)
         if match:
             value = clean_text(match.group(1))
-            value = re.split(
-                r"\b(?:Visibility|Financial Information|Opportunity-Specific Information|Department|Donor|Fund Code|Auxiliary Fund Code|Project ID|Type|Post-Acceptance|Source|Visible Award Amount)\b",
-                value
-            )[0].strip()
-            return value
+            value = re.split(stop_words, value)[0].strip(" :-")
+            if value:
+                return value
     return ""
 
 
 def number(text, label):
-    match = re.search(rf"{re.escape(label)}\s*\$?([\d,]+(?:\.\d+)?)", text)
+    match = re.search(rf"{re.escape(label)}\s*:?\s*\$?([\d,]+(?:\.\d+)?)", text, re.I)
     return float(match.group(1).replace(",", "")) if match else None
 
 
@@ -98,24 +116,159 @@ def clean_for_requirement_matching(text):
     return text
 
 
+def extract_name(raw_text, fallback_name):
+    lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+
+    skip_exact = {
+        "Portfolio", "Applicant", "Basic Information", "Financial Information",
+        "Opportunity-Specific Information", "Award Information", "Questions",
+        "Description", "Full Description", "Keywords"
+    }
+
+    skip_patterns = [
+        r"^Fall\s+\d{4}$",
+        r"^Spring\s+\d{4}$",
+        r"^\|\s*Ended",
+        r"^https?://",
+        r"^\d+/\d+$",
+        r"^\d{1,2}/\d{1,2}/\d{2,4},?",
+        r"^Name\s+",
+        r"^Deadline\s+",
+        r"^Type\s+",
+        r"^Department\s+",
+        r"^Donor\s+",
+        r"^Fund Code\s+",
+    ]
+
+    for line in lines:
+        clean_line = normalize(line)
+        if not clean_line or clean_line in skip_exact:
+            continue
+        if "Eastern Illinois University Scholarships" in clean_line:
+            continue
+        if any(re.search(pattern, clean_line, re.I) for pattern in skip_patterns):
+            continue
+
+        if 3 <= len(clean_line) <= 120:
+            return clean_line
+
+    return fallback_name.rsplit(".", 1)[0]
+
+
+def extract_description_blocks(text):
+    description = between(text, r"Description\s*:?\s*", r"\s*Full\s+[Dd]escription")
+    full_description = between(text, r"Full\s+[Dd]escription\s*:?\s*", r"\s*(?:Keywords|Type|Department|Donor|Fund Code|$)")
+    if not description and not full_description:
+        description = between(text, r"Description\s*:?\s*", r"\s*(?:Type|Department|Donor|Fund Code|$)")
+    return clean_text(description), clean_text(full_description)
+
+
+def find_requirement_sections(text):
+    """
+    Try to isolate requirement-heavy text instead of using broad description text.
+    """
+    text = clean_text(text)
+    section_labels = [
+        "Eligibility", "Eligible", "Criteria", "Requirements", "Qualifications",
+        "Selection Criteria", "Applicant Criteria", "Minimum Qualifications"
+    ]
+
+    sections = []
+    for label in section_labels:
+        pattern = rf"{label}\s*:?\s*(.*?)(?=\n[A-Z][A-Za-z0-9 /&()'-]{{2,40}}:?\s|\Z)"
+        for match in re.finditer(pattern, text, re.S | re.I):
+            chunk = clean_text(match.group(1))
+            if chunk and len(chunk) > 20:
+                sections.append(chunk)
+
+    return unique_keep_order(sections)
+
+
+def build_requirement_text(raw_text, cleaned_text):
+    description, full_description = extract_description_blocks(cleaned_text)
+    found_sections = find_requirement_sections(cleaned_text)
+
+    candidates = []
+    if found_sections:
+        candidates.extend(found_sections)
+
+    if full_description:
+        candidates.append(full_description)
+    if description:
+        candidates.append(description)
+
+    combined = clean_text("\n\n".join(unique_keep_order(candidates)))
+    return clean_for_requirement_matching(combined)
+
+
+def parse_date_string(date_str):
+    if not date_str:
+        return ""
+
+    date_str = normalize(date_str).rstrip(".,;:")
+    date_str = re.sub(r"(\d)(st|nd|rd|th)\b", r"\1", date_str, flags=re.I)
+
+    formats = [
+        "%B %d, %Y", "%b %d, %Y",
+        "%B %d %Y", "%b %d %Y",
+        "%m/%d/%Y", "%m/%d/%y",
+        "%m-%d-%Y", "%m-%d-%y",
+    ]
+
+    for fmt in formats:
+        try:
+            return datetime.strptime(date_str, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+
+    return date_str
+
+
+def deadline(text):
+    patterns = [
+        rf"(?:deadline|application deadline|applications? due|due date|must be submitted by|submit by|apply by)\s*[:\-]?\s*((?:{MONTHS})\.?\s+\d{{1,2}}(?:st|nd|rd|th)?(?:,\s*\d{{4}})?)",
+        r"(?:deadline|application deadline|applications? due|due date|must be submitted by|submit by|apply by)\s*[:\-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
+        rf"\bby\s+((?:{MONTHS})\.?\s+\d{{1,2}}(?:st|nd|rd|th)?(?:,\s*\d{{4}})?)\b",
+        r"\bby\s+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, text, re.I)
+        if match:
+            return parse_date_string(match.group(1))
+
+    return ""
+
+
 def gpa(text):
     patterns = [
-        r"minimum GPA of (\d\.\d+|\d)",
-        r"GPA of at least (\d\.\d+|\d)",
-        r"cumulative GPA of (\d\.\d+|\d)",
-        r"maintain a GPA of at least (\d\.\d+|\d)",
-        r"have a GPA of (\d\.\d+|\d) or higher",
-        r"(\d\.\d+|\d)\s*GPA"
+        r"minimum GPA(?: of)?\s*(\d\.\d+|\d)",
+        r"GPA(?: of)? at least\s*(\d\.\d+|\d)",
+        r"cumulative GPA(?: of)?\s*(\d\.\d+|\d)",
+        r"maintain a GPA(?: of)? at least\s*(\d\.\d+|\d)",
+        r"have a GPA of\s*(\d\.\d+|\d)\s*or higher",
+        r"must have (?:a )?minimum cumulative GPA of\s*(\d\.\d+|\d)",
+        r"must maintain (?:a )?GPA of\s*(\d\.\d+|\d)",
+        r"must have (?:a )?GPA of\s*(\d\.\d+|\d)",
+        r"overall GPA(?: of)?\s*(\d\.\d+|\d)",
+        r"grade point average(?: of)?\s*(\d\.\d+|\d)",
+        r"\b(\d\.\d+)\s*GPA\b",
+        r"\bGPA\s*[:\-]?\s*(\d\.\d+|\d)\b",
     ]
+
     for pattern in patterns:
         match = re.search(pattern, text, re.I)
         if match:
             try:
-                return float(match.group(1))
+                value = float(match.group(1))
+                if 0.0 <= value <= 4.0:
+                    return value
             except ValueError:
-                pass
+                continue
+
     if re.search(r"\bB average\b", text, re.I):
         return 3.0
+
     return None
 
 
@@ -139,67 +292,62 @@ def class_levels(text):
         if re.search(pattern, text, re.I):
             levels.append(label)
 
-    return "; ".join(levels)
+    return "; ".join(unique_keep_order(levels))
 
 
-def extract_name(raw_text, fallback_name):
-    lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
-
-    skip_exact = {
-        "Portfolio", "Applicant", "Basic Information", "Financial Information",
-        "Opportunity-Specific Information", "Award Information", "Questions",
-    }
-
-    skip_patterns = [
-        r"^Fall\s+\d{4}$",
-        r"^Spring\s+\d{4}$",
-        r"^\|\s*Ended",
-        r"^https?://",
-        r"^\d+/\d+$",
-        r"^\d{1,2}/\d{1,2}/\d{2,4},?",
-        r"^Name\s+",
-    ]
-
-    for line in lines:
-        clean_line = normalize(line)
-        if not clean_line or clean_line in skip_exact:
-            continue
-        if any(re.search(pattern, clean_line, re.I) for pattern in skip_patterns):
-            continue
-        if "Eastern Illinois University Scholarships" in clean_line:
-            continue
-        return clean_line
-
-    return fallback_name.rsplit(".", 1)[0]
+def normalize_location_phrase(text):
+    text = normalize(text)
+    text = text.strip(" .,:;")
+    text = re.sub(r"\bMclean\b", "McLean", text, flags=re.I)
+    text = re.sub(r"\bColes county\b", "Coles County", text, flags=re.I)
+    text = re.sub(r"\bClay county\b", "Clay County", text, flags=re.I)
+    text = re.sub(r"\bRichland county\b", "Richland County", text, flags=re.I)
+    text = re.sub(r"\bCumberland county\b", "Cumberland County", text, flags=re.I)
+    text = re.sub(r"\bCook county\b", "Cook County", text, flags=re.I)
+    text = re.sub(r"\bCentral illinois\b", "Central Illinois", text, flags=re.I)
+    text = re.sub(r"\bSouthern illinois\b", "Southern Illinois", text, flags=re.I)
+    text = re.sub(r"\bNorthern illinois\b", "Northern Illinois", text, flags=re.I)
+    text = re.sub(r"\bUnited states\b", "United States", text, flags=re.I)
+    return text
 
 
 def geographic_preference(text):
+    """
+    Much tighter than the earlier version:
+    only capture location when it appears in requirement-like phrasing.
+    """
     text = clean_for_requirement_matching(text)
-
-    context_patterns = [
-        r"(?:resident|residents|residency|living|live|from|preference(?: given)? to students from|students from|permanent address in|graduates? of high schools? in|applicants? from)\s+([^.:\n;]+)",
-        r"(?:must be|shall be)\s+(?:a\s+)?resident of\s+([^.:\n;]+)",
-    ]
-
     found = []
 
-    for pattern in context_patterns:
+    phrase_patterns = [
+        r"(?:must be|shall be|is open to|restricted to)\s+(?:a\s+)?resident of\s+([A-Za-z ,'-]+?)(?=[.;\n]| and | who | with |$)",
+        r"(?:residents?|resident students?)\s+of\s+([A-Za-z ,'-]+?)(?=[.;\n]| and | who | with |$)",
+        r"(?:students?|applicants?)\s+from\s+([A-Za-z ,'-]+?)(?=[.;\n]| and | who | with |$)",
+        r"(?:must live|must reside|live|reside)\s+in\s+([A-Za-z ,'-]+?)(?=[.;\n]| and | who | with |$)",
+        r"(?:permanent address|legal residence)\s+in\s+([A-Za-z ,'-]+?)(?=[.;\n]| and | who | with |$)",
+        r"(?:graduates?|graduates? of students?)\s+of\s+high schools?\s+in\s+([A-Za-z ,'-]+?)(?=[.;\n]| and | who | with |$)",
+        r"(?:preference(?: is)? given to|preference(?: will be)? given to)\s+(?:students?|applicants?)\s+from\s+([A-Za-z ,'-]+?)(?=[.;\n]| and | who | with |$)",
+    ]
+
+    for pattern in phrase_patterns:
         for match in re.finditer(pattern, text, re.I):
-            chunk = match.group(1)
+            candidate = normalize_location_phrase(match.group(1))
+            if 2 <= len(candidate) <= 80:
+                found.append(candidate)
 
-            for county in re.findall(r"\b[A-Z][a-z]+ County\b", chunk):
-                found.append(county)
+    # County/city/state fallback only when tied to requirement language
+    requirement_windows = re.findall(
+        r"((?:resident|reside|live|from|address|preference given|high school in)[^.:\n]{0,120})",
+        text,
+        re.I
+    )
 
-            for phrase in LOCATION_WORDS:
-                if re.search(rf"\b{re.escape(phrase)}\b", chunk, re.I):
-                    found.append(phrase.title() if phrase != "mba" else "MBA")
-
-    found = [x.replace("Mclean", "McLean").replace("Coles county", "Coles County")
-               .replace("Clay county", "Clay County").replace("Richland county", "Richland County")
-               .replace("Cumberland county", "Cumberland County").replace("Cook county", "Cook County")
-               .replace("Central illinois", "Central Illinois").replace("Southern illinois", "Southern Illinois")
-               .replace("Northern illinois", "Northern Illinois").replace("United states", "United States")
-             for x in found]
+    for window in requirement_windows:
+        for county in re.findall(r"\b[A-Z][a-z]+ County\b", window):
+            found.append(normalize_location_phrase(county))
+        for phrase in LOCATION_WORDS:
+            if re.search(rf"\b{re.escape(phrase)}\b", window, re.I):
+                found.append(normalize_location_phrase(phrase.title()))
 
     return ", ".join(unique_keep_order(found))
 
@@ -220,29 +368,29 @@ def underserved_flag(text):
 
 def major_field(text):
     text = clean_for_requirement_matching(text)
-
-    context_patterns = [
-        r"(?:major(?:ing)? in|majors? in|major field of study in|students? in|enrolled in|pursuing a degree in|degree in)\s+([^.:\n;]+)",
-        r"(?:accounting students|business students|education students|MBA students)",
-    ]
-
     found = []
 
-    for term in MAJOR_TERMS:
-        # tighter: only count majors when they appear in requirement-like contexts
-        for pattern in context_patterns:
-            for match in re.finditer(pattern, text, re.I):
-                chunk = match.group(0)
+    context_patterns = [
+        r"(?:major(?:ing)? in|majors? in|students? majoring in|degree in|pursuing a degree in|field of study in|enrolled in)\s+([^.:\n;]+)",
+        r"(?:open to|restricted to)\s+([^.:\n;]+?)\s+majors?",
+        r"(?:for|awarded to)\s+([^.:\n;]+?)\s+students",
+    ]
+
+    for pattern in context_patterns:
+        for match in re.finditer(pattern, text, re.I):
+            chunk = match.group(1)
+            for term in MAJOR_TERMS:
                 if re.search(rf"\b{re.escape(term)}\b", chunk, re.I):
                     found.append(term)
 
-    # direct scholarship phrases
     direct_map = {
         "accounting students": "Accounting",
         "business students": "Business",
         "education students": "Education",
         "mba students": "MBA",
+        "stem students": "STEM",
     }
+
     for phrase, label in direct_map.items():
         if re.search(rf"\b{re.escape(phrase)}\b", text, re.I):
             found.append(label)
@@ -259,58 +407,57 @@ def major_field(text):
     return ", ".join(cleaned)
 
 
-def deadline(text):
-    patterns = [
-        r"deadline[:\s]+([A-Za-z]+\s+\d{1,2},\s+\d{4})",
-        r"deadline[:\s]+(\d{1,2}/\d{1,2}/\d{2,4})",
-        r"applications? due[:\s]+([A-Za-z]+\s+\d{1,2},\s+\d{4})",
-        r"applications? due[:\s]+(\d{1,2}/\d{1,2}/\d{2,4})",
-        r"due date[:\s]+([A-Za-z]+\s+\d{1,2},\s+\d{4})",
-        r"due date[:\s]+(\d{1,2}/\d{1,2}/\d{2,4})",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, text, re.I)
-        if match:
-            return match.group(1).strip()
-    return ""
-
-
 def extract(uploaded_file):
     raw_text, text = get_texts_from_upload(uploaded_file)
 
     scholarship_name = extract_name(raw_text, uploaded_file.name)
-    description = between(text, r"Description\s*", r"\s*Full\s+[Dd]escription")
-    full_description = between(text, r"Full\s+[Dd]escription:?\s*", r"\s*Keywords:")
-    keywords_raw = between(text, r"Keywords:\s*", r"\s*Type\b")
+    description, full_description = extract_description_blocks(text)
+    requirement_text = build_requirement_text(raw_text, text)
 
-    combined = clean_text(f"{description} {full_description} {keywords_raw}")
+    # Broader fallback text for fields that may appear outside requirements
+    broad_text = clean_text("\n\n".join([
+        description,
+        full_description,
+        requirement_text,
+        text
+    ]))
+
+    min_gpa = gpa(requirement_text) or gpa(broad_text)
+    geo_pref = geographic_preference(requirement_text) or geographic_preference(broad_text)
+    due_date = deadline(text) or deadline(requirement_text) or deadline(broad_text)
 
     return {
-        "Scholarship Name": scholarship_name,
+        "Scholarship Name": safe(scholarship_name),
         "Import Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "Fund Period Amount": number(text, "Fund Period Amount"),
-        "Department": single(raw_text, "Department"),
-        "Donor": single(raw_text, "Donor"),
-        "Fund Code": single(raw_text, "Fund Code"),
-        "Opportunity Type": single(raw_text, "Type"),
-        "Post-Acceptance Enabled": single(raw_text, "Post-Acceptance"),
-        "Minimum GPA": gpa(combined),
-        "Full-Time Required": flag(combined, r"full[- ]time"),
-        "Class Level Eligible": class_levels(combined),
-        "Geographic Preference": geographic_preference(combined),
-        "Financial Need Considered": financial_need(combined),
-        "Low Income / Underprivileged Background": underserved_flag(combined),
-        "Major / Field of Study": major_field(combined),
-        "Deadline": deadline(text + "\n" + combined),
+        "Department": safe(single(raw_text, "Department")),
+        "Donor": safe(single(raw_text, "Donor")),
+        "Fund Code": safe(single(raw_text, "Fund Code")),
+        "Opportunity Type": safe(single(raw_text, "Type")),
+        "Post-Acceptance Enabled": safe(single(raw_text, "Post-Acceptance")),
+        "Minimum GPA": safe(min_gpa),
+        "Full-Time Required": flag(requirement_text, r"full[- ]time"),
+        "Class Level Eligible": safe(class_levels(requirement_text)),
+        "Geographic Preference": safe(geo_pref),
+        "Financial Need Considered": financial_need(requirement_text),
+        "Low Income / Underprivileged Background": underserved_flag(requirement_text),
+        "Major / Field of Study": safe(major_field(requirement_text)),
+        "Deadline": safe(due_date),
         "Renewable / Reapply Allowed": flag(
-            combined,
+            requirement_text,
             r"apply again|eligible to apply again|continues to meet criteria|renewable|may reapply"
         ),
-        "Resume Required": flag(combined, r"\bresume\b|\bcv\b|curriculum vitae"),
-        "Essay Required": flag(combined, r"\bessay\b|brief summary|short essay|personal statement|statement of purpose"),
-        "Recommendation Required": flag(combined, r"recommendation|reference letter|letter of recommendation"),
+        "Resume Required": flag(requirement_text, r"\bresume\b|\bcv\b|curriculum vitae"),
+        "Essay Required": flag(
+            requirement_text,
+            r"\bessay\b|brief summary|short essay|personal statement|statement of purpose"
+        ),
+        "Recommendation Required": flag(
+            requirement_text,
+            r"recommendation|reference letter|letter of recommendation"
+        ),
         "Character / Leadership Mentioned": flag(
-            combined,
+            requirement_text,
             r"character|leadership|work ethic|personal values|motivation|goals|service|integrity"
         ),
         "Notes": "",
@@ -320,7 +467,7 @@ def extract(uploaded_file):
 def summary(df):
     rows = [
         ["Total Scholarships", len(df)],
-        ["Total Fund Amount", df["Fund Period Amount"].fillna(0).sum()],
+        ["Total Fund Amount", pd.to_numeric(df["Fund Period Amount"], errors="coerce").fillna(0).sum()],
         ["", ""],
         ["Opportunity Type", "Count"]
     ]
@@ -367,19 +514,19 @@ def format_scholarships_sheet(ws, df_columns):
         "Fund Code": 16,
         "Opportunity Type": 18,
         "Post-Acceptance Enabled": 20,
-        "Minimum GPA": 12,
+        "Minimum GPA": 14,
         "Full-Time Required": 14,
         "Class Level Eligible": 24,
-        "Geographic Preference": 28,
-        "Financial Need Considered": 18,
-        "Low Income / Underprivileged Background": 26,
-        "Major / Field of Study": 24,
+        "Geographic Preference": 30,
+        "Financial Need Considered": 20,
+        "Low Income / Underprivileged Background": 28,
+        "Major / Field of Study": 26,
         "Deadline": 16,
-        "Renewable / Reapply Allowed": 20,
+        "Renewable / Reapply Allowed": 22,
         "Resume Required": 14,
         "Essay Required": 14,
         "Recommendation Required": 18,
-        "Character / Leadership Mentioned": 24,
+        "Character / Leadership Mentioned": 26,
         "Notes": 28,
     }
 
@@ -442,7 +589,7 @@ if uploaded_files:
             df = pd.DataFrame(data)
             excel_file = build_excel_bytes(df)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"scholarship_database_v2_{timestamp}.xlsx"
+            filename = f"scholarship_database_v3_{timestamp}.xlsx"
 
             st.success("Processing complete.")
             st.dataframe(df, use_container_width=True)
