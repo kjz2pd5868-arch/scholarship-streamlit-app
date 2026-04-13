@@ -1,4 +1,4 @@
-import re
+  import re
 from io import BytesIO
 from datetime import datetime
 
@@ -168,7 +168,11 @@ def extract_name(raw_text, fallback_name):
 
 def extract_description_blocks(text):
     description = between(text, r"Description\s*:?\s*", r"\s*Full\s+[Dd]escription")
-    full_description = between(text, r"Full\s+[Dd]escription\s*:?\s*", r"\s*(?:Keywords|Type|Department|Donor|Fund Code|$)")
+    full_description = between(
+        text,
+        r"Full\s+[Dd]escription\s*:?\s*",
+        r"\s*(?:Keywords|Type|Department|Donor|Fund Code|$)"
+    )
     if not description and not full_description:
         description = between(text, r"Description\s*:?\s*", r"\s*(?:Type|Department|Donor|Fund Code|$)")
     return clean_text(description), clean_text(full_description)
@@ -217,19 +221,25 @@ def split_sentences(text):
 def parse_date_string(date_str):
     if not date_str:
         return ""
+
     date_str = normalize(date_str).rstrip(".,;:")
     date_str = re.sub(r"(\d)(st|nd|rd|th)\b", r"\1", date_str, flags=re.I)
 
     formats = [
         "%B %d, %Y", "%b %d, %Y",
         "%B %d %Y", "%b %d %Y",
+        "%B %d", "%b %d",
         "%m/%d/%Y", "%m/%d/%y",
         "%m-%d-%Y", "%m-%d-%y",
+        "%m/%d", "%m-%d",
     ]
 
     for fmt in formats:
         try:
-            return datetime.strptime(date_str, fmt).strftime("%Y-%m-%d")
+            dt = datetime.strptime(date_str, fmt)
+            if "%Y" not in fmt and "%y" not in fmt:
+                dt = dt.replace(year=datetime.now().year)
+            return dt.strftime("%Y-%m-%d")
         except ValueError:
             continue
 
@@ -239,8 +249,11 @@ def parse_date_string(date_str):
 def extract_date_from_sentence(sentence):
     patterns = [
         rf"\b(({MONTHS_PATTERN})\.?\s+\d{{1,2}}(?:st|nd|rd|th)?(?:,\s*\d{{4}})?)\b",
+        rf"\b(({MONTHS_PATTERN})\.?\s+\d{{1,2}}(?:st|nd|rd|th)?)\b",
         r"\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b",
+        r"\b(\d{1,2}[/-]\d{1,2})\b",
     ]
+
     for pattern in patterns:
         match = re.search(pattern, sentence, re.I)
         if match:
@@ -252,23 +265,28 @@ def deadline(text):
     if not text:
         return ""
 
-    priority_words = [
-        "deadline", "application deadline", "applications due", "due date",
-        "submit by", "must be submitted by", "apply by", "application due",
-        "completed by", "must apply by", "must submit by", "received by"
-    ]
-
     sentences = split_sentences(text)
+
+    priority_patterns = [
+        r"deadline",
+        r"application deadline",
+        r"applications due",
+        r"due date",
+        r"submit by",
+        r"must be submitted by",
+        r"apply by",
+        r"application due",
+        r"completed by",
+        r"must apply by",
+        r"must submit by",
+        r"received by",
+        r"no later than",
+        r"priority consideration",
+    ]
 
     for sentence in sentences:
         lowered = sentence.lower()
-        if any(word in lowered for word in priority_words):
-            date_val = extract_date_from_sentence(sentence)
-            if date_val:
-                return date_val
-
-    for sentence in sentences:
-        if re.search(r"\bby\b", sentence, re.I):
+        if any(re.search(pattern, lowered) for pattern in priority_patterns):
             date_val = extract_date_from_sentence(sentence)
             if date_val:
                 return date_val
@@ -340,9 +358,6 @@ def normalize_location_phrase(text):
         "Richland county": "Richland County",
         "Cumberland county": "Cumberland County",
         "Cook county": "Cook County",
-        "Central illinois": "Central Illinois",
-        "Southern illinois": "Southern Illinois",
-        "Northern illinois": "Northern Illinois",
         "United states": "United States",
     }
     for old, new in replacements.items():
@@ -352,7 +367,12 @@ def normalize_location_phrase(text):
 
 def clean_location_fragment(fragment):
     fragment = normalize_location_phrase(fragment)
-    fragment = re.sub(r"\b(other|area|local|eligible|incoming|current|majoring|majors?|students?|applicants?)\b.*$", "", fragment, flags=re.I)
+    fragment = re.sub(
+        r"\b(other|area|local|eligible|incoming|current|majoring|majors?|students?|applicants?)\b.*$",
+        "",
+        fragment,
+        flags=re.I
+    )
     fragment = fragment.strip(" ,;:-")
     return fragment
 
@@ -419,7 +439,10 @@ def underserved_flag(text):
     pattern = (
         r"low[- ]income|underprivileged|underserved|disadvantaged|"
         r"first[- ]generation|first generation|underrepresented|"
-        r"historically marginalized|background of hardship|financial barriers"
+        r"historically marginalized|background of hardship|"
+        r"financial barriers|financial hardship|economic hardship|"
+        r"limited financial resources|demonstrated financial need|"
+        r"high financial need|Pell(?: Grant)? eligible|Pell recipient"
     )
     return yes_no_or_not_specified(text, pattern)
 
@@ -481,10 +504,6 @@ def extract(uploaded_file):
     geo_pref = geographic_preference(requirement_text) or geographic_preference(broad_text)
     due_date = deadline(text) or deadline(requirement_text) or deadline(broad_text)
 
-    resume_required = yes_no_or_not_specified(
-        requirement_text,
-        r"\bresume\b|\bcv\b|curriculum vitae"
-    )
     essay_required = yes_no_or_not_specified(
         requirement_text,
         r"\bessay\b|brief summary|short essay|personal statement|statement of purpose"
@@ -519,7 +538,6 @@ def extract(uploaded_file):
             requirement_text,
             r"apply again|eligible to apply again|continues to meet criteria|renewable|may reapply"
         ),
-        "Resume Required": resume_required,
         "Essay Required": essay_required,
         "Recommendation Required": recommendation_required,
         "Character / Leadership Mentioned": leadership_mentioned,
@@ -586,7 +604,6 @@ def format_scholarships_sheet(ws, df_columns):
         "Major / Field of Study": 26,
         "Deadline": 16,
         "Renewable / Reapply Allowed": 22,
-        "Resume Required": 16,
         "Essay Required": 16,
         "Recommendation Required": 20,
         "Character / Leadership Mentioned": 28,
@@ -652,7 +669,7 @@ if uploaded_files:
             df = pd.DataFrame(data)
             excel_file = build_excel_bytes(df)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"scholarship_database_v4_{timestamp}.xlsx"
+            filename = f"scholarship_database_v5_{timestamp}.xlsx"
 
             st.success("Processing complete.")
             st.dataframe(df, use_container_width=True)
