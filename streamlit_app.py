@@ -436,15 +436,54 @@ def financial_need(text):
 
 
 def underserved_flag(text):
-    pattern = (
-        r"low[- ]income|underprivileged|underserved|disadvantaged|"
-        r"first[- ]generation|first generation|underrepresented|"
-        r"historically marginalized|background of hardship|"
-        r"financial barriers|financial hardship|economic hardship|"
-        r"limited financial resources|demonstrated financial need|"
-        r"high financial need|Pell(?: Grant)? eligible|Pell recipient"
-    )
-    return yes_no_or_not_specified(text, pattern)
+    if not text or not text.strip():
+        return "Not Specified"
+
+    strong_patterns = [
+        r"low[- ]income",
+        r"underprivileged",
+        r"underserved",
+        r"economically disadvantaged",
+        r"financially disadvantaged",
+        r"disadvantaged background",
+        r"first[- ]generation",
+        r"first generation",
+        r"underrepresented",
+        r"historically marginalized",
+        r"financial hardship",
+        r"economic hardship",
+        r"limited financial resources",
+        r"limited means",
+        r"background of hardship",
+        r"pell(?: grant)? eligible",
+        r"pell recipient",
+    ]
+
+    moderate_patterns = [
+        r"demonstrated financial need",
+        r"high financial need",
+        r"significant financial need",
+        r"unmet financial need",
+        r"financial need",
+        r"economic need",
+        r"need[- ]based",
+        r"fafsa",
+    ]
+
+    for pattern in strong_patterns:
+        if re.search(pattern, text, re.I):
+            return "Yes"
+
+    if re.search(
+        r"(preference given|given preference|priority given|eligibility|eligible|selection|awarded to|must demonstrate|required to demonstrate)",
+        text,
+        re.I
+    ):
+        for pattern in moderate_patterns:
+            if re.search(pattern, text, re.I):
+                return "Yes"
+
+    return "No"
 
 
 def major_field(text):
@@ -504,6 +543,10 @@ def extract(uploaded_file):
     geo_pref = geographic_preference(requirement_text) or geographic_preference(broad_text)
     due_date = deadline(text) or deadline(requirement_text) or deadline(broad_text)
 
+    low_income_flag = underserved_flag(requirement_text)
+    if low_income_flag == "No":
+        low_income_flag = underserved_flag(broad_text)
+
     essay_required = yes_no_or_not_specified(
         requirement_text,
         r"\bessay\b|brief summary|short essay|personal statement|statement of purpose"
@@ -531,7 +574,7 @@ def extract(uploaded_file):
         "Class Level Eligible": safe(class_levels(requirement_text)),
         "Geographic Preference": safe(geo_pref),
         "Financial Need Considered": financial_need(requirement_text),
-        "Low Income / Underprivileged Background": underserved_flag(requirement_text),
+        "Low Income / Underprivileged Background": low_income_flag,
         "Major / Field of Study": safe(major_field(requirement_text)),
         "Deadline": safe(due_date),
         "Renewable / Reapply Allowed": yes_no_or_not_specified(
@@ -669,7 +712,7 @@ if uploaded_files:
             df = pd.DataFrame(data)
             excel_file = build_excel_bytes(df)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"scholarship_database_v5_{timestamp}.xlsx"
+            filename = f"scholarship_database_v6_{timestamp}.xlsx"
 
             st.success("Processing complete.")
             st.dataframe(df, use_container_width=True)
