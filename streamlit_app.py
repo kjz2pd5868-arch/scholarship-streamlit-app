@@ -10,6 +10,7 @@ from openpyxl.utils import get_column_letter
 
 HEADER_FILL_COLOR = "1F4E78"
 HEADER_FONT_COLOR = "FFFFFF"
+APP_VERSION = "v10"
 
 MAJOR_TERMS = [
     "accounting", "business", "finance", "marketing", "management",
@@ -37,7 +38,6 @@ CITY_WORDS = [
 ]
 
 
-# ---------- General helpers ----------
 def clean_text(text: str) -> str:
     if not text:
         return ""
@@ -124,7 +124,6 @@ def clean_for_requirement_matching(text):
     return text
 
 
-# ---------- Scholarship text parsing ----------
 def extract_name(raw_text, fallback_name):
     lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
 
@@ -215,7 +214,6 @@ def split_sentences(text):
     return [s.strip() for s in re.split(r"(?<=[.!?])\s+|\n+", text) if s.strip()]
 
 
-# ---------- Field extractors ----------
 def gpa(text):
     patterns = [
         r"minimum GPA(?: of)?\s*(\d\.\d+|\d)",
@@ -357,12 +355,14 @@ def financial_need(text):
     return yes_no_or_not_specified(text, pattern)
 
 
-def first_matching_pattern(text, patterns):
-    for pattern in patterns:
-        match = re.search(pattern, text, re.I)
-        if match:
-            return pattern, match.group(0)
-    return None, ""
+def _match_evidence(sentences, pattern_specs):
+    hits = []
+    for sentence in sentences:
+        for label, pattern in pattern_specs:
+            if re.search(pattern, sentence, re.I):
+                evidence = f"{label}: {normalize(sentence)}"
+                hits.append(evidence)
+    return unique_keep_order(hits)
 
 
 def low_income_tier_with_evidence(text):
@@ -371,96 +371,58 @@ def low_income_tier_with_evidence(text):
 
     sentences = split_sentences(text)
 
-    strong_patterns = [
-        r"low[- ]income",
-        r"underprivileged",
-        r"underserved",
-        r"economically disadvantaged",
-        r"financially disadvantaged",
-        r"disadvantaged background",
-        r"first[- ]generation",
-        r"first generation college",
-        r"underrepresented",
-        r"historically marginalized",
-        r"financial hardship",
-        r"economic hardship",
-        r"limited financial resources",
-        r"limited means",
-        r"background of hardship",
-        r"pell(?: grant)? eligible",
-        r"pell recipient",
-        r"free or reduced[- ]price lunch",
-        r"free/reduced lunch",
-        r"income[- ]eligible",
-        r"federal poverty",
-        r"below the poverty line",
-        r"expected family contribution",
-        r"\bEFC\b",
-        r"student aid index",
-        r"\bSAI\b",
-        r"unmet financial need",
-        r"high financial need",
-        r"significant financial need",
+    strong_specs = [
+        ("low-income", r"\blow[- ]income\b"),
+        ("economically disadvantaged", r"economically disadvantaged|financially disadvantaged"),
+        ("underprivileged/underserved", r"underprivileged|underserved"),
+        ("first-generation", r"first[- ]generation"),
+        ("underrepresented", r"underrepresented|historically marginalized"),
+        ("hardship", r"financial hardship|economic hardship|background of hardship"),
+        ("limited resources", r"limited financial resources|limited means"),
+        ("pell", r"pell(?: grant)? eligible|pell recipient|\bpell(?: grant)?\b"),
+        ("free/reduced lunch", r"free or reduced[- ]price lunch|free/reduced lunch"),
+        ("income-eligible", r"income[- ]eligible"),
+        ("poverty reference", r"federal poverty|below the poverty line"),
+        ("EFC/SAI", r"expected family contribution|\bEFC\b|student aid index|\bSAI\b"),
+        ("unmet financial need", r"unmet financial need"),
+        ("demonstrated financial need", r"demonstrated financial need"),
+        ("need-based", r"\bneed[- ]based\b"),
+        ("FAFSA required", r"fafsa (?:required|must be filed|must be completed|must complete|on file|required for consideration)"),
+        ("financial need required", r"financial need (?:is required|required|must be demonstrated|required for consideration)"),
     ]
 
-    moderate_patterns = [
-        r"demonstrated financial need",
-        r"financial need",
-        r"need[- ]based",
-        r"economic need",
-        r"fafsa",
-        r"pell(?: grant)?",
-        r"preference .* financial need",
-        r"priority .* financial need",
-        r"need is a factor",
-        r"need shall be considered",
-        r"need will be considered",
-        r"need may be considered",
-        r"financial need considered",
-        r"financial need will be considered",
-        r"financial need may be considered",
-        r"must demonstrate need",
-        r"demonstrate need",
-        r"based on need",
-        r"students with need",
-        r"financial circumstances",
-        r"financial situation",
-        r"family income",
-        r"household income",
+    moderate_specs = [
+        ("financial need", r"\bfinancial need\b"),
+        ("economic need", r"\beconomic need\b"),
+        ("high/significant need", r"high financial need|significant financial need"),
+        ("FAFSA mention", r"\bfafsa\b"),
+        ("need considered", r"financial need (?:considered|will be considered|may be considered)|need shall be considered|need is a factor"),
+        ("need preference", r"preference .* financial need|priority .* financial need"),
     ]
 
-    # Sentence-level pass first for cleaner evidence.
-    for sentence in sentences:
-        _, evidence = first_matching_pattern(sentence, strong_patterns)
-        if evidence:
-            return "Yes", sentence[:250]
+    strong_hits = _match_evidence(sentences, strong_specs)
+    if strong_hits:
+        return "Yes", "; ".join(strong_hits)
 
-    for sentence in sentences:
-        _, evidence = first_matching_pattern(sentence, moderate_patterns)
-        if evidence:
-            return "Possible", sentence[:250]
-
-    # Fallback on broader text in case PDF sentence boundaries are messy.
-    _, evidence = first_matching_pattern(text, strong_patterns)
-    if evidence:
-        return "Yes", evidence[:250]
-
-    _, evidence = first_matching_pattern(text, moderate_patterns)
-    if evidence:
-        return "Possible", evidence[:250]
+    moderate_hits = _match_evidence(sentences, moderate_specs)
+    if moderate_hits:
+        return "Possible", "; ".join(moderate_hits)
 
     return "No", ""
 
 
-def choose_need_signal(requirement_text, broad_text):
-    req_tier, req_evidence = low_income_tier_with_evidence(requirement_text)
-    broad_tier, broad_evidence = low_income_tier_with_evidence(broad_text)
-
-    rank = {"Yes": 3, "Possible": 2, "No": 1, "Not Specified": 0}
-
-    if rank.get(broad_tier, 0) > rank.get(req_tier, 0):
-        return broad_tier, broad_evidence
-    return req_tier, req_evidence
+def choose_better_need_result(primary_tier, primary_evidence, fallback_tier, fallback_evidence):
+    rank = {"Not Specified": 0, "No": 1, "Possible": 2, "Yes": 3}
+    if rank.get(fallback_tier, 0) > rank.get(primary_tier, 0):
+        return fallback_tier, fallback_evidence
+    if rank.get(fallback_tier, 0) == rank.get(primary_tier, 0):
+        merged = unique_keep_order([
+            part.strip()
+            for part in (primary_evidence + "; " + fallback_evidence).split(";")
+            if part.strip()
+        ])
+        return primary_tier, "; ".join(merged)
+    return primary_tier, primary_evidence
 
 
 def major_field(text):
@@ -502,7 +464,6 @@ def major_field(text):
     return ", ".join(unique_keep_order(cleaned))
 
 
-# ---------- Record builder ----------
 def extract(uploaded_file):
     raw_text, text = get_texts_from_upload(uploaded_file)
 
@@ -519,7 +480,15 @@ def extract(uploaded_file):
 
     min_gpa = gpa(requirement_text) or gpa(broad_text)
     geo_pref = geographic_preference(requirement_text) or geographic_preference(broad_text)
-    low_income_signal, low_income_evidence = choose_need_signal(requirement_text, broad_text)
+
+    low_income_signal, low_income_evidence = low_income_tier_with_evidence(requirement_text)
+    broad_signal, broad_evidence = low_income_tier_with_evidence(broad_text)
+    low_income_signal, low_income_evidence = choose_better_need_result(
+        low_income_signal,
+        low_income_evidence,
+        broad_signal,
+        broad_evidence,
+    )
 
     essay_required = yes_no_or_not_specified(
         requirement_text,
@@ -562,7 +531,6 @@ def extract(uploaded_file):
     }
 
 
-# ---------- Excel output ----------
 def summary(df):
     rows = [
         ["Total Scholarships", len(df)],
@@ -570,7 +538,6 @@ def summary(df):
         ["Low Income / Need Indicator = Yes", int((df["Low Income / Need Indicator"] == "Yes").sum())],
         ["Low Income / Need Indicator = Possible", int((df["Low Income / Need Indicator"] == "Possible").sum())],
         ["Low Income / Need Indicator = No", int((df["Low Income / Need Indicator"] == "No").sum())],
-        ["Need Indicator Evidence Present", int(df["Need Indicator Evidence"].fillna("").astype(str).str.strip().ne("").sum())],
         ["", ""],
         ["Opportunity Type", "Count"]
     ]
@@ -623,7 +590,7 @@ def format_scholarships_sheet(ws, df_columns):
         "Geographic Preference": 32,
         "Financial Need Considered": 22,
         "Low Income / Need Indicator": 24,
-        "Need Indicator Evidence": 48,
+        "Need Indicator Evidence": 52,
         "Major / Field of Study": 26,
         "Renewable / Reapply Allowed": 22,
         "Essay Required": 16,
@@ -660,10 +627,9 @@ def build_excel_bytes(df):
     return output
 
 
-# ---------- Streamlit UI ----------
 st.set_page_config(page_title="Scholarship Data Extraction Tool", layout="wide")
 st.title("Scholarship Data Extraction Tool")
-st.caption("Running version: v9")
+st.caption(f"Running version: {APP_VERSION}")
 st.markdown("""
 Upload scholarship PDFs, review the extracted fields, and download a formatted Excel workbook.
 
@@ -693,7 +659,7 @@ if uploaded_files:
             df = pd.DataFrame(data)
             excel_file = build_excel_bytes(df)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"scholarship_database_v9_{timestamp}.xlsx"
+            filename = f"scholarship_database_{APP_VERSION}_{timestamp}.xlsx"
 
             st.success("Processing complete.")
             st.dataframe(df, use_container_width=True)
