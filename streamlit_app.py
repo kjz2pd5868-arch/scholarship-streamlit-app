@@ -10,7 +10,6 @@ from openpyxl.utils import get_column_letter
 
 HEADER_FILL_COLOR = "1F4E78"
 HEADER_FONT_COLOR = "FFFFFF"
-APP_VERSION = "v10"
 
 MAJOR_TERMS = [
     "accounting", "business", "finance", "marketing", "management",
@@ -35,6 +34,78 @@ COUNTY_WORDS = [
 
 CITY_WORDS = [
     "Chicago", "Bloomington", "Normal", "Mattoon", "Charleston"
+]
+
+YES_NEED_PATTERNS = [
+    r"low[- ]income",
+    r"underprivileged",
+    r"underserved",
+    r"economically disadvantaged",
+    r"financially disadvantaged",
+    r"disadvantaged background",
+    r"first[- ]generation",
+    r"underrepresented",
+    r"historically marginalized",
+    r"financial hardship",
+    r"economic hardship",
+    r"limited financial resources",
+    r"limited means",
+    r"background of hardship",
+    r"pell(?: grant)?(?: eligible| recipient)?",
+    r"free or reduced[- ]price lunch",
+    r"free/reduced lunch",
+    r"income[- ]eligible",
+    r"federal poverty",
+    r"below the poverty line",
+    r"expected family contribution",
+    r"\bEFC\b",
+    r"student aid index",
+    r"\bSAI\b",
+    r"unmet financial need",
+    r"demonstrated financial need",
+    r"must demonstrate financial need",
+    r"financial need required",
+    r"need[- ]based",
+    r"FAFSA required",
+    r"must complete (?:the )?FAFSA",
+    r"FAFSA on file",
+]
+
+POSSIBLE_NEED_PATTERNS = [
+    r"financial need",
+    r"economic need",
+    r"high financial need",
+    r"significant financial need",
+    r"financial need considered",
+    r"financial need will be considered",
+    r"financial need may be considered",
+    r"need shall be considered",
+    r"need is a factor",
+    r"FAFSA",
+    r"preference .* financial need",
+    r"priority .* financial need",
+]
+
+CONTEXT_PATTERNS = [
+    r"gpa",
+    r"grade point average",
+    r"resident",
+    r"reside",
+    r"live in",
+    r"county",
+    r"state",
+    r"financial need",
+    r"need[- ]based",
+    r"fafsa",
+    r"pell",
+    r"major",
+    r"degree",
+    r"full[- ]time",
+    r"essay",
+    r"recommendation",
+    r"letter of recommendation",
+    r"first[- ]generation",
+    r"low[- ]income",
 ]
 
 
@@ -355,74 +426,45 @@ def financial_need(text):
     return yes_no_or_not_specified(text, pattern)
 
 
-def _match_evidence(sentences, pattern_specs):
-    hits = []
-    for sentence in sentences:
-        for label, pattern in pattern_specs:
-            if re.search(pattern, sentence, re.I):
-                evidence = f"{label}: {normalize(sentence)}"
-                hits.append(evidence)
-    return unique_keep_order(hits)
-
-
-def low_income_tier_with_evidence(text):
+def classify_need_indicator(text):
     if not text or not text.strip():
         return "Not Specified", ""
 
     sentences = split_sentences(text)
+    yes_evidence = []
+    possible_evidence = []
 
-    strong_specs = [
-        ("low-income", r"\blow[- ]income\b"),
-        ("economically disadvantaged", r"economically disadvantaged|financially disadvantaged"),
-        ("underprivileged/underserved", r"underprivileged|underserved"),
-        ("first-generation", r"first[- ]generation"),
-        ("underrepresented", r"underrepresented|historically marginalized"),
-        ("hardship", r"financial hardship|economic hardship|background of hardship"),
-        ("limited resources", r"limited financial resources|limited means"),
-        ("pell", r"pell(?: grant)? eligible|pell recipient|\bpell(?: grant)?\b"),
-        ("free/reduced lunch", r"free or reduced[- ]price lunch|free/reduced lunch"),
-        ("income-eligible", r"income[- ]eligible"),
-        ("poverty reference", r"federal poverty|below the poverty line"),
-        ("EFC/SAI", r"expected family contribution|\bEFC\b|student aid index|\bSAI\b"),
-        ("unmet financial need", r"unmet financial need"),
-        ("demonstrated financial need", r"demonstrated financial need"),
-        ("need-based", r"\bneed[- ]based\b"),
-        ("FAFSA required", r"fafsa (?:required|must be filed|must be completed|must complete|on file|required for consideration)"),
-        ("financial need required", r"financial need (?:is required|required|must be demonstrated|required for consideration)"),
-    ]
+    for sentence in sentences:
+        sentence_clean = normalize(sentence)
+        if not sentence_clean:
+            continue
 
-    moderate_specs = [
-        ("financial need", r"\bfinancial need\b"),
-        ("economic need", r"\beconomic need\b"),
-        ("high/significant need", r"high financial need|significant financial need"),
-        ("FAFSA mention", r"\bfafsa\b"),
-        ("need considered", r"financial need (?:considered|will be considered|may be considered)|need shall be considered|need is a factor"),
-        ("need preference", r"preference .* financial need|priority .* financial need"),
-    ]
+        yes_hits = [pat for pat in YES_NEED_PATTERNS if re.search(pat, sentence_clean, re.I)]
+        possible_hits = [pat for pat in POSSIBLE_NEED_PATTERNS if re.search(pat, sentence_clean, re.I)]
 
-    strong_hits = _match_evidence(sentences, strong_specs)
-    if strong_hits:
-        return "Yes", "; ".join(strong_hits)
+        if yes_hits:
+            yes_evidence.append(sentence_clean)
+        elif possible_hits:
+            possible_evidence.append(sentence_clean)
 
-    moderate_hits = _match_evidence(sentences, moderate_specs)
-    if moderate_hits:
-        return "Possible", "; ".join(moderate_hits)
-
+    if yes_evidence:
+        return "Yes", "; ".join(unique_keep_order(yes_evidence[:5]))
+    if possible_evidence:
+        return "Possible", "; ".join(unique_keep_order(possible_evidence[:5]))
     return "No", ""
 
 
-def choose_better_need_result(primary_tier, primary_evidence, fallback_tier, fallback_evidence):
-    rank = {"Not Specified": 0, "No": 1, "Possible": 2, "Yes": 3}
-    if rank.get(fallback_tier, 0) > rank.get(primary_tier, 0):
-        return fallback_tier, fallback_evidence
-    if rank.get(fallback_tier, 0) == rank.get(primary_tier, 0):
-        merged = unique_keep_order([
-            part.strip()
-            for part in (primary_evidence + "; " + fallback_evidence).split(";")
-            if part.strip()
-        ])
-        return primary_tier, "; ".join(merged)
-    return primary_tier, primary_evidence
+def extract_requirement_context(text, max_sentences=3):
+    if not text or not text.strip():
+        return ""
+
+    selected = []
+    for sentence in split_sentences(text):
+        if any(re.search(pattern, sentence, re.I) for pattern in CONTEXT_PATTERNS):
+            selected.append(normalize(sentence))
+
+    selected = unique_keep_order(selected)
+    return " | ".join(selected[:max_sentences])
 
 
 def major_field(text):
@@ -481,14 +523,12 @@ def extract(uploaded_file):
     min_gpa = gpa(requirement_text) or gpa(broad_text)
     geo_pref = geographic_preference(requirement_text) or geographic_preference(broad_text)
 
-    low_income_signal, low_income_evidence = low_income_tier_with_evidence(requirement_text)
-    broad_signal, broad_evidence = low_income_tier_with_evidence(broad_text)
-    low_income_signal, low_income_evidence = choose_better_need_result(
-        low_income_signal,
-        low_income_evidence,
-        broad_signal,
-        broad_evidence,
-    )
+    low_income_signal, need_evidence = classify_need_indicator(requirement_text)
+    if low_income_signal in {"No", "Not Specified"}:
+        broad_signal, broad_evidence = classify_need_indicator(broad_text)
+        if broad_signal == "Yes" or (broad_signal == "Possible" and low_income_signal != "Yes"):
+            low_income_signal = broad_signal
+            need_evidence = broad_evidence
 
     essay_required = yes_no_or_not_specified(
         requirement_text,
@@ -518,7 +558,8 @@ def extract(uploaded_file):
         "Geographic Preference": safe(geo_pref),
         "Financial Need Considered": financial_need(requirement_text),
         "Low Income / Need Indicator": low_income_signal,
-        "Need Indicator Evidence": safe(low_income_evidence),
+        "Need / Context Evidence": safe(need_evidence),
+        "Eligibility / Requirement Context": safe(extract_requirement_context(requirement_text)),
         "Major / Field of Study": safe(major_field(requirement_text)),
         "Renewable / Reapply Allowed": yes_no_or_not_specified(
             requirement_text,
@@ -565,7 +606,7 @@ def style_header_row(ws):
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         cell.border = thin_border
 
-    ws.row_dimensions[1].height = 24
+    ws.row_dimensions[1].height = 26
 
 
 def format_scholarships_sheet(ws, df_columns):
@@ -590,7 +631,8 @@ def format_scholarships_sheet(ws, df_columns):
         "Geographic Preference": 32,
         "Financial Need Considered": 22,
         "Low Income / Need Indicator": 24,
-        "Need Indicator Evidence": 52,
+        "Need / Context Evidence": 48,
+        "Eligibility / Requirement Context": 52,
         "Major / Field of Study": 26,
         "Renewable / Reapply Allowed": 22,
         "Essay Required": 16,
@@ -629,7 +671,7 @@ def build_excel_bytes(df):
 
 st.set_page_config(page_title="Scholarship Data Extraction Tool", layout="wide")
 st.title("Scholarship Data Extraction Tool")
-st.caption(f"Running version: {APP_VERSION}")
+st.caption("Running version: v11")
 st.markdown("""
 Upload scholarship PDFs, review the extracted fields, and download a formatted Excel workbook.
 
@@ -659,7 +701,7 @@ if uploaded_files:
             df = pd.DataFrame(data)
             excel_file = build_excel_bytes(df)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"scholarship_database_{APP_VERSION}_{timestamp}.xlsx"
+            filename = f"scholarship_database_v11_{timestamp}.xlsx"
 
             st.success("Processing complete.")
             st.dataframe(df, use_container_width=True)
