@@ -1,3 +1,4 @@
+
 import re
 from io import BytesIO
 from datetime import datetime
@@ -215,7 +216,8 @@ def split_sentences(text):
     if not text:
         return []
     text = normalize(text)
-    return [s.strip() for s in re.split(r"(?<=[.!?])\s+|\n+", text) if s.strip()]
+    pieces = re.split(r"(?<=[.!?])\s+|\n+", text)
+    return [s.strip() for s in pieces if s.strip()]
 
 
 def parse_date_string(date_str):
@@ -261,11 +263,28 @@ def extract_date_from_sentence(sentence):
     return ""
 
 
-def deadline(text):
+def find_labeled_deadline(text):
     if not text:
         return ""
+    label_patterns = [
+        r"\b(?:application\s+deadline|deadline|due\s+date|applications?\s+due|apply\s+by|submit\s+by)\b\s*[:\-]?\s*([^\n]{1,60})",
+        r"\b(?:deadline|due\s+date)\b\s*([A-Za-z0-9,/\- ]{3,40})",
+    ]
+    for pattern in label_patterns:
+        for match in re.finditer(pattern, text, re.I):
+            candidate = normalize(match.group(1))
+            date_val = extract_date_from_sentence(candidate)
+            if date_val:
+                return date_val
+    return ""
+
+
+def deadline_candidates(text):
+    if not text:
+        return []
 
     sentences = split_sentences(text)
+    candidates = []
 
     priority_patterns = [
         r"deadline",
@@ -289,9 +308,26 @@ def deadline(text):
         if any(re.search(pattern, lowered) for pattern in priority_patterns):
             date_val = extract_date_from_sentence(sentence)
             if date_val:
-                return date_val
+                score = 2
+                if re.search(r"deadline|applications due|due date|apply by|submit by|received by|no later than", lowered):
+                    score += 2
+                if re.search(r"priority consideration", lowered):
+                    score -= 1
+                candidates.append((score, date_val, sentence))
 
-    return ""
+    labeled = find_labeled_deadline(text)
+    if labeled:
+        candidates.append((5, labeled, "labeled_deadline"))
+
+    return candidates
+
+
+def deadline(text):
+    candidates = deadline_candidates(text)
+    if not candidates:
+        return ""
+    candidates.sort(key=lambda x: (-x[0], x[1]))
+    return candidates[0][1]
 
 
 def gpa(text):
@@ -431,8 +467,23 @@ def geographic_preference(text):
 
 
 def financial_need(text):
-    pattern = r"financial need|demonstrated need|FAFSA|Pell(?: Grant)?|need-based|economic need"
+    pattern = r"financial need|demonstrated need|FAFSA|Pell(?: Grant)?|need-based|economic need|unmet need|SAI|EFC"
     return yes_no_or_not_specified(text, pattern)
+
+
+def sentence_windows(text):
+    if not text:
+        return []
+    sentences = split_sentences(text)
+    windows = []
+    for i, sentence in enumerate(sentences):
+        local = [sentence]
+        if i > 0:
+            local.insert(0, sentences[i - 1])
+        if i + 1 < len(sentences):
+            local.append(sentences[i + 1])
+        windows.append(" ".join(local))
+    return windows
 
 
 def underserved_flag(text):
@@ -446,8 +497,6 @@ def underserved_flag(text):
         r"economically disadvantaged",
         r"financially disadvantaged",
         r"disadvantaged background",
-        r"first[- ]generation",
-        r"first generation",
         r"underrepresented",
         r"historically marginalized",
         r"financial hardship",
@@ -457,31 +506,48 @@ def underserved_flag(text):
         r"background of hardship",
         r"pell(?: grant)? eligible",
         r"pell recipient",
+        r"federal pell grant",
+        r"grant recipient",
+        r"expected family contribution",
+        r"\bEFC\b",
+        r"student aid index",
+        r"\bSAI\b",
+        r"unmet financial need",
+        r"high financial need",
+        r"significant financial need",
+        r"income-eligible",
+        r"income eligible",
+        r"need-based scholarship",
+        r"need based scholarship",
+        r"free or reduced[- ]price lunch",
+        r"first[- ]generation and low[- ]income",
     ]
 
     moderate_patterns = [
         r"demonstrated financial need",
-        r"high financial need",
-        r"significant financial need",
-        r"unmet financial need",
         r"financial need",
         r"economic need",
         r"need[- ]based",
         r"fafsa",
+        r"must file fafsa",
+        r"fafsa on file",
+        r"fafsa required",
     ]
 
-    for pattern in strong_patterns:
-        if re.search(pattern, text, re.I):
+    selection_context = r"(preference given|given preference|priority given|eligibility|eligible|selection|awarded to|must demonstrate|required to demonstrate|consideration given|preference to|priority to)"
+    exclusion_context = r"(loan|repay|billing|tuition statement|financial aid office hours|contact the office|how to apply for aid)"
+
+    if any(re.search(pattern, text, re.I) for pattern in strong_patterns):
+        return "Yes"
+
+    for window in sentence_windows(text):
+        if re.search(exclusion_context, window, re.I):
+            continue
+        if re.search(selection_context, window, re.I) and any(re.search(pattern, window, re.I) for pattern in moderate_patterns):
             return "Yes"
 
-    if re.search(
-        r"(preference given|given preference|priority given|eligibility|eligible|selection|awarded to|must demonstrate|required to demonstrate)",
-        text,
-        re.I
-    ):
-        for pattern in moderate_patterns:
-            if re.search(pattern, text, re.I):
-                return "Yes"
+    if re.search(r"\b(recipient of|eligible for)\b", text, re.I) and re.search(r"\bPell(?: Grant)?\b", text, re.I):
+        return "Yes"
 
     return "No"
 
@@ -525,6 +591,10 @@ def major_field(text):
     return ", ".join(unique_keep_order(cleaned))
 
 
+def get_deadline_status(deadline_value):
+    return "Present" if deadline_value else "Missing"
+
+
 def extract(uploaded_file):
     raw_text, text = get_texts_from_upload(uploaded_file)
 
@@ -541,7 +611,13 @@ def extract(uploaded_file):
 
     min_gpa = gpa(requirement_text) or gpa(broad_text)
     geo_pref = geographic_preference(requirement_text) or geographic_preference(broad_text)
-    due_date = deadline(text) or deadline(requirement_text) or deadline(broad_text)
+
+    deadline_value = (
+        find_labeled_deadline(raw_text)
+        or deadline(text)
+        or deadline(requirement_text)
+        or deadline(broad_text)
+    )
 
     low_income_flag = underserved_flag(requirement_text)
     if low_income_flag == "No":
@@ -573,10 +649,11 @@ def extract(uploaded_file):
         "Full-Time Required": yes_no_or_not_specified(requirement_text, r"full[- ]time"),
         "Class Level Eligible": safe(class_levels(requirement_text)),
         "Geographic Preference": safe(geo_pref),
-        "Financial Need Considered": financial_need(requirement_text),
+        "Financial Need Considered": financial_need(requirement_text) if financial_need(requirement_text) == "Yes" else financial_need(broad_text),
         "Low Income / Underprivileged Background": low_income_flag,
         "Major / Field of Study": safe(major_field(requirement_text)),
-        "Deadline": safe(due_date),
+        "Deadline": safe(deadline_value),
+        "Deadline Status": get_deadline_status(deadline_value),
         "Renewable / Reapply Allowed": yes_no_or_not_specified(
             requirement_text,
             r"apply again|eligible to apply again|continues to meet criteria|renewable|may reapply"
@@ -592,6 +669,10 @@ def summary(df):
     rows = [
         ["Total Scholarships", len(df)],
         ["Total Fund Amount", pd.to_numeric(df["Fund Period Amount"], errors="coerce").fillna(0).sum()],
+        ["Deadline Present Count", int((df["Deadline Status"] == "Present").sum()) if "Deadline Status" in df.columns else 0],
+        ["Deadline Coverage %", round(100 * (df["Deadline Status"] == "Present").mean(), 1) if "Deadline Status" in df.columns and len(df) else 0],
+        ["Low Income Yes Count", int((df["Low Income / Underprivileged Background"] == "Yes").sum()) if "Low Income / Underprivileged Background" in df.columns else 0],
+        ["Low Income Yes %", round(100 * (df["Low Income / Underprivileged Background"] == "Yes").mean(), 1) if "Low Income / Underprivileged Background" in df.columns and len(df) else 0],
         ["", ""],
         ["Opportunity Type", "Count"]
     ]
@@ -646,6 +727,7 @@ def format_scholarships_sheet(ws, df_columns):
         "Low Income / Underprivileged Background": 30,
         "Major / Field of Study": 26,
         "Deadline": 16,
+        "Deadline Status": 16,
         "Renewable / Reapply Allowed": 22,
         "Essay Required": 16,
         "Recommendation Required": 20,
@@ -712,7 +794,7 @@ if uploaded_files:
             df = pd.DataFrame(data)
             excel_file = build_excel_bytes(df)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"scholarship_database_v6_{timestamp}.xlsx"
+            filename = f"scholarship_database_v7_{timestamp}.xlsx"
 
             st.success("Processing complete.")
             st.dataframe(df, use_container_width=True)
